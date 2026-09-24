@@ -124,9 +124,19 @@ class ProbabilityEnsemble:
         return float((self.predict(X) == y).mean())
 
 
+def _count_geq(S_calib_true, S):
+    """#{i : S_calib_true[i] >= S[j, y]} for every entry of S, in O((n + mK) log n).
+
+    Same result as the broadcast (S_calib_true[None, :, None] >= S[:, None, :]).sum(1),
+    without allocating an (m, n, K) array.
+    """
+    s = np.sort(np.asarray(S_calib_true, dtype=float))
+    return len(s) - np.searchsorted(s, S, side="left")
+
+
 def conformal_pvalues(S_calib_true, S_test_all):
     n = len(S_calib_true)
-    counts = (S_calib_true[None, :, None] >= S_test_all[:, None, :]).sum(axis=1)
+    counts = _count_geq(S_calib_true, S_test_all)
     return (1 + counts) / (n + 1)
 
 def conformal_pvalues_loo(S_calib_true, S_calib_all):
@@ -137,7 +147,7 @@ def conformal_pvalues_loo(S_calib_true, S_calib_all):
     size n-1 and the denominator is n. Use conformal_pvalues() at test time.
     """
     n        = len(S_calib_true)
-    counts   = (S_calib_true[None, :, None] >= S_calib_all[:, None, :]).sum(axis=1)
+    counts   = _count_geq(S_calib_true, S_calib_all)
     self_hit = (S_calib_true[:, None] >= S_calib_all)          # (n, K)
     return (1 + counts - self_hit) / n
 
