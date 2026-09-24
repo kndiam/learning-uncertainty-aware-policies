@@ -34,9 +34,15 @@ def make_features(Sigma, S, u):
     ], axis=1)
 
 
-def make_loader(Sigma, S, E, u, batch_size=32, shuffle=True):
+def make_loader(Sigma, S, E, u, batch_size=32, shuffle=True, w=None):
+    """
+    u : uncertainty, used as a network feature.
+    w : per-point weight c(u) in the loss  Size + lam * w * alpha.
+        None keeps the original behaviour w = u.
+    """
     t = lambda a: torch.tensor(np.asarray(a), dtype=torch.float32)
-    ds = TensorDataset(t(make_features(Sigma, S, u)), t(E), t(u))
+    w = u if w is None else w
+    ds = TensorDataset(t(make_features(Sigma, S, u)), t(E), t(w))
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle)
 
 def make_features_reg(Sigma, n_cal, u):
@@ -45,9 +51,11 @@ def make_features_reg(Sigma, n_cal, u):
     Sigma = np.broadcast_to(np.asarray(Sigma, dtype=float), u.shape)
     return np.stack([Sigma / n_cal, u], axis=1)
 
-def make_loader_reg(Sigma, n_cal, u, batch_size=32, shuffle=True):
+def make_loader_reg(Sigma, n_cal, u, batch_size=32, shuffle=True, w=None):
+    """Same convention as make_loader: u is the feature, w = c(u) weights the loss (None -> u)."""
     t = lambda a: torch.tensor(np.asarray(a), dtype=torch.float32)
-    ds = TensorDataset(t(make_features_reg(Sigma, n_cal, u)), t(Sigma), t(u))
+    w = u if w is None else w
+    ds = TensorDataset(t(make_features_reg(Sigma, n_cal, u)), t(Sigma), t(w))
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle)
 
 class AlphaNet(nn.Module):
@@ -174,17 +182,17 @@ def train_alpha_net(train_loader, lam, run_id=0, num_epochs=200, lr=1e-3,
     for epoch in range(num_epochs):
         total_loss = total_size = total_alpha = 0.0
 
-        for x_batch, E_batch, u_batch in train_loader:
+        for x_batch, E_batch, w_batch in train_loader:
             x_batch = x_batch.to(device)
             E_batch = E_batch.to(device)
-            u_batch = u_batch.to(device)
+            w_batch = w_batch.to(device)          # c(u) per point (= u unless make_loader got w)
             
             alpha_pred  = alpha_net(x_batch)
             if regression:
                 batch_sizes = interval_size(E_batch, alpha_pred, n_cal)
             else:
                 batch_sizes = smooth_size(E_batch, alpha_pred)
-            loss = (batch_sizes + lam * u_batch * alpha_pred).mean()
+            loss = (batch_sizes + lam * w_batch * alpha_pred).mean()
 
             optimizer.zero_grad()
             loss.backward()
