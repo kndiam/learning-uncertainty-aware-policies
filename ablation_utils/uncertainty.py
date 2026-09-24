@@ -1,7 +1,5 @@
 """Uncertainty estimators for the coverage-policy ablation."""
 
-from ensurepip import bootstrap
-
 import numpy as np
 from dataclasses import dataclass
 from sklearn.base import clone
