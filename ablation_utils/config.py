@@ -52,9 +52,21 @@ CLASSIFICATION = {
 }
 
 
-def lambda_clf(E_loo, num_classes):
-    """Rule used in the notebooks: (K - 1) * max E_loo, rounded down to a multiple of 5."""
+def lambda_upper_clf(E_loo, num_classes):
+    """The notebooks' "highest recommended lambda": (K - 1) * max E_loo, rounded down to a multiple of 5.
+    Above this, alpha collapses to its floor."""
     return int(((num_classes - 1) * E_loo.max()) // 5) * 5
+
+
+# The notebooks disagree here: compare_uncertainties uses lam = 10, while
+# _closed_form, _eu_aware and _mmi use the upper bound above. Set one value per
+# dataset; None means "use the upper bound".
+LAMBDA_CLF = {"BLOBS": 10, "PENDIGITS": 10, "FASHION_MNIST": 10}
+
+
+def lambda_clf(dataname, E_loo, num_classes):
+    lam = LAMBDA_CLF.get(dataname)
+    return lambda_upper_clf(E_loo, num_classes) if lam is None else lam
 
 
 # ── regression ────────────────────────────────────────────────────────────────
