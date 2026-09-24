@@ -11,11 +11,8 @@ from torch.utils.data import TensorDataset, DataLoader
 This file contains the neural network and training code for the adaptive coverage policy learner and associated utility functions.
 It also includes utility functions for plotting results, smoothing data, and comparison to other methods of building prediction sets.
 """
-def interval_size(scores, alpha):
-    n = len(scores)
-    r = scores.sum() / (alpha * (n + 1) - 1)
-    return 2 * r
-
+def interval_size(Sigma, alpha, n_cal):
+    return 2 * Sigma / ((n_cal + 1) * alpha - 1)
 
 def pad_to(arr, length):
     arr = np.asarray(arr, dtype=float)
@@ -149,7 +146,7 @@ class EarlyStopping:
 
 
 
-def train_alpha_net(train_loader, lam, run_id=0, num_epochs=200, lr=1e-3,
+def train_alpha_net(train_loader, lam, run_id=0, num_epochs=200, lr=1e-3, 
                     max_alpha=1.0, patience=None, regression=False, device='cpu'):
     """
     Changes:
@@ -158,11 +155,17 @@ def train_alpha_net(train_loader, lam, run_id=0, num_epochs=200, lr=1e-3,
       - `batch_size` and `K` removed -- both were dead parameters
       - optional early stopping
     """
+    
     input_dim = train_loader.dataset.tensors[0].shape[1]
     E_all = train_loader.dataset.tensors[1]     
-    min_alpha = float(1.0 / E_all.max())
-    alpha_net = AlphaNet(input_dim=input_dim, max_alpha=max_alpha, min_alpha=min_alpha).to(device)
+    n_cal = len(E_all)-1
     # alpha_net = AlphaNet(input_dim=input_dim, max_alpha=max_alpha).to(device)
+    if regression:
+        min_alpha = 1.05 / (n_cal + 1)          
+    else:
+        min_alpha = float(1.0 / E_all.max())   
+
+    alpha_net = AlphaNet(input_dim=input_dim, max_alpha=max_alpha, min_alpha=min_alpha).to(device)
     optimizer = torch.optim.Adam(alpha_net.parameters(), lr=lr)
     stopper   = EarlyStopping(patience=patience) if patience else None
 
@@ -178,7 +181,7 @@ def train_alpha_net(train_loader, lam, run_id=0, num_epochs=200, lr=1e-3,
             
             alpha_pred  = alpha_net(x_batch)
             if regression:
-                batch_sizes = interval_size(E_batch, alpha_pred)
+                batch_sizes = interval_size(E_batch, alpha_pred, n_cal)
             else:
                 batch_sizes = smooth_size(E_batch, alpha_pred)
             loss = (batch_sizes + lam * u_batch * alpha_pred).mean()
@@ -215,7 +218,7 @@ def train_alpha_net(train_loader, lam, run_id=0, num_epochs=200, lr=1e-3,
 
 
 
-def multi_lambda_run_train_alpha_net(train_loader, lambdas, num_epochs=200, lr=1e-3,
+def multi_lambda_run_train_alpha_net(train_loader, lambdas, num_epochs=200, lr=1e-3, 
                                      num_runs=5, max_alpha=1.0, patience=None, regression=False,
                                      device='cpu'):
     """
@@ -233,7 +236,7 @@ def multi_lambda_run_train_alpha_net(train_loader, lambdas, num_epochs=200, lr=1
             print(f"\n[lambda={lam}] run {run + 1}/{num_runs}")
 
             net, meta = train_alpha_net(
-                train_loader, lam, run_id=run, num_epochs=num_epochs, lr=lr,
+                train_loader, lam, run_id=run, num_epochs=num_epochs, lr=lr, 
                 max_alpha=max_alpha, patience=patience, device=device, regression=regression
             )
             losses.append(meta["losses"])
@@ -254,7 +257,7 @@ def multi_lambda_run_train_alpha_net(train_loader, lambdas, num_epochs=200, lr=1
     return all_results
 
 
-def run_uncertainty_ablation(train_loaders, lam, num_epochs=200, lr=1e-3, regression=False,
+def run_uncertainty_ablation(train_loaders, lam, num_epochs=200, lr=1e-3, regression=False, 
                              num_runs=5, max_alpha=1.0, patience=None, device='cpu'):
     """
     One result per uncertainty method, with key as uncertainty method name.
