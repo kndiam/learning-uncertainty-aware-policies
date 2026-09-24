@@ -11,7 +11,22 @@ from torch.utils.data import TensorDataset, DataLoader
 This file contains the neural network and training code for the adaptive coverage policy learner and associated utility functions.
 It also includes utility functions for plotting results, smoothing data, and comparison to other methods of building prediction sets.
 """
+def interval_size(scores, alpha):
+    n = len(scores)
+    r = scores.sum() / (alpha * (n + 1) - 1)
+    return 2 * r
 
+
+def pad_to(arr, length):
+    arr = np.asarray(arr, dtype=float)
+
+    if len(arr) >= length:
+        return arr[:length]
+
+    return np.concatenate([
+        arr,
+        np.full(length - len(arr), arr[-1])
+    ])
 
 def make_features(Sigma, S, u):
     """[Sigma, sorted scores, u] -> (n, K+2).  Training AND evaluation call this."""
@@ -27,8 +42,19 @@ def make_loader(Sigma, S, E, u, batch_size=32, shuffle=True):
     ds = TensorDataset(t(make_features(Sigma, S, u)), t(E), t(u))
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle)
 
+def make_features_reg(Sigma, n_cal, u):
+    """[mean calibration score, u] -> (m, 2).  Training AND evaluation call this."""
+    u = np.asarray(u, dtype=float)
+    Sigma = np.broadcast_to(np.asarray(Sigma, dtype=float), u.shape)
+    return np.stack([Sigma / n_cal, u], axis=1)
+
+def make_loader_reg(Sigma, n_cal, u, batch_size=32, shuffle=True):
+    t = lambda a: torch.tensor(np.asarray(a), dtype=torch.float32)
+    ds = TensorDataset(t(make_features_reg(Sigma, n_cal, u)), t(Sigma), t(u))
+    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle)
+
 class AlphaNet(nn.Module):
-    def __init__(self, input_dim, hidden_dim=32, max_alpha=1.0, min_alpha=0.0):
+    def __init__(self, input_dim, hidden_dim=32, max_alpha=1.0, min_alpha=0.0, initial_alpha=0.5):
         super().__init__()
         self.fc1     = nn.Linear(input_dim, hidden_dim)
         self.fc2     = nn.Linear(hidden_dim, 1)
@@ -36,13 +62,14 @@ class AlphaNet(nn.Module):
         self.sigmoid = nn.Sigmoid()
         self.max_alpha = max_alpha
         self.min_alpha = min_alpha
-        self._initialize_to_one()
+        self._initialize_weights(initial_alpha)
 
 
-    def _initialize_to_one(self):
+    def _initialize_weights(self, initial_alpha):
         with torch.no_grad():
             self.fc2.weight.normal_(0, 0.01)
-            self.fc2.bias.fill_(5.0)
+            logit = np.log(initial_alpha / (1 - initial_alpha))
+            self.fc2.bias.fill_(logit)
 
     def forward(self, x):
         h = self.relu(self.fc1(x))
@@ -119,16 +146,11 @@ class EarlyStopping:
                 model.load_state_dict(self.best_weights)
             return True
         return False
-    
-    def _pad_to(arr, length):
-        """Forward-fill a truncated run so curves from different runs stack."""
-        arr = np.asarray(arr, dtype=float)
-        if len(arr) >= length:
-            return arr[:length]
-        return np.concatenate([arr, np.full(length - len(arr), arr[-1])])
+
+
 
 def train_alpha_net(train_loader, lam, run_id=0, num_epochs=200, lr=1e-3,
-                    max_alpha=1.0, patience=None, device='cpu'):
+                    max_alpha=1.0, patience=None, regression=False, device='cpu'):
     """
     Changes:
       - input_dim inferred from the data instead of hardcoded `1 + K`
@@ -140,6 +162,7 @@ def train_alpha_net(train_loader, lam, run_id=0, num_epochs=200, lr=1e-3,
     E_all = train_loader.dataset.tensors[1]     
     min_alpha = float(1.0 / E_all.max())
     alpha_net = AlphaNet(input_dim=input_dim, max_alpha=max_alpha, min_alpha=min_alpha).to(device)
+    # alpha_net = AlphaNet(input_dim=input_dim, max_alpha=max_alpha).to(device)
     optimizer = torch.optim.Adam(alpha_net.parameters(), lr=lr)
     stopper   = EarlyStopping(patience=patience) if patience else None
 
@@ -152,13 +175,20 @@ def train_alpha_net(train_loader, lam, run_id=0, num_epochs=200, lr=1e-3,
             x_batch = x_batch.to(device)
             E_batch = E_batch.to(device)
             u_batch = u_batch.to(device)
-
+            
             alpha_pred  = alpha_net(x_batch)
-            batch_sizes = smooth_size(E_batch, alpha_pred)
+            if regression:
+                batch_sizes = interval_size(E_batch, alpha_pred)
+            else:
+                batch_sizes = smooth_size(E_batch, alpha_pred)
             loss = (batch_sizes + lam * u_batch * alpha_pred).mean()
 
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                alpha_net.parameters(),
+                max_norm=1.0
+            )
             optimizer.step()
 
             total_loss  += loss.item()
@@ -184,8 +214,9 @@ def train_alpha_net(train_loader, lam, run_id=0, num_epochs=200, lr=1e-3,
                        "alphas": np.array(all_alphas)}
 
 
+
 def multi_lambda_run_train_alpha_net(train_loader, lambdas, num_epochs=200, lr=1e-3,
-                                     num_runs=5, max_alpha=1.0, patience=None,
+                                     num_runs=5, max_alpha=1.0, patience=None, regression=False,
                                      device='cpu'):
     """
     One result per lambda, keyed by lambda. Same shape as
@@ -203,24 +234,27 @@ def multi_lambda_run_train_alpha_net(train_loader, lambdas, num_epochs=200, lr=1
 
             net, meta = train_alpha_net(
                 train_loader, lam, run_id=run, num_epochs=num_epochs, lr=lr,
-                max_alpha=max_alpha, patience=patience, device=device,
+                max_alpha=max_alpha, patience=patience, device=device, regression=regression
             )
             losses.append(meta["losses"])
             sizes.append(meta["sizes"])
             alphas.append(meta["alphas"])
             nets.append(net)
 
+
+        max_len = max(len(x) for x in losses)
+
         all_results[lam] = {
-            "losses": np.array(losses),
-            "sizes":  np.array(sizes),
-            "alphas": np.array(alphas),
-            "nets":   nets,
+            "losses": np.array([pad_to(x, max_len) for x in losses]),
+            "sizes":  np.array([pad_to(x, max_len) for x in sizes]),
+            "alphas": np.array([pad_to(x, max_len) for x in alphas]),
+            "nets": nets,
         }
 
     return all_results
 
 
-def run_uncertainty_ablation(train_loaders, lam, num_epochs=200, lr=1e-3,
+def run_uncertainty_ablation(train_loaders, lam, num_epochs=200, lr=1e-3, regression=False,
                              num_runs=5, max_alpha=1.0, patience=None, device='cpu'):
     """
     One result per uncertainty method, with key as uncertainty method name.
@@ -237,19 +271,21 @@ def run_uncertainty_ablation(train_loaders, lam, num_epochs=200, lr=1e-3,
 
             net, meta = train_alpha_net(
                 loader, lam, run_id=run, num_epochs=num_epochs, lr=lr,
-                max_alpha=max_alpha, patience=patience, device=device,
+                max_alpha=max_alpha, patience=patience, device=device, regression=regression
             )
             losses.append(meta["losses"])
             sizes.append(meta["sizes"])
             alphas.append(meta["alphas"])
             nets.append(net)
+        max_len = max(len(x) for x in losses)
 
         all_results[name] = {
-            "losses": np.array(losses),
-            "sizes":  np.array(sizes),
-            "alphas": np.array(alphas),
-            "nets":   nets,
+            "losses": np.array([pad_to(x, max_len) for x in losses]),
+            "sizes":  np.array([pad_to(x, max_len) for x in sizes]),
+            "alphas": np.array([pad_to(x, max_len) for x in alphas]),
+            "nets": nets,
         }
+
 
     return all_results
 
@@ -417,7 +453,7 @@ def plot_performance(all_results, path, labels=None, window_size=10,
         ax.set_title(title)
         ax.grid(True)
 
-    axs[2].legend(frameon=True)
+
 
     for ax in axs:
         ax.xaxis.set_minor_locator(AutoMinorLocator(5))
@@ -427,5 +463,10 @@ def plot_performance(all_results, path, labels=None, window_size=10,
         ax.tick_params(which="major", width=2)
 
     plt.tight_layout()
+    handles, leg_labels = axs[0].get_legend_handles_labels()
+    fig.legend(handles, leg_labels, loc="upper center",
+               bbox_to_anchor=(0.5, 0.0), ncol=len(leg_labels), frameon=True)
+
+    plt.savefig(path, format="pdf", bbox_inches="tight")
     plt.savefig(path, format="pdf", bbox_inches="tight")
     plt.show()

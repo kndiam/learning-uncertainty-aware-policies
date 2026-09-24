@@ -6,7 +6,8 @@ import numpy as np
 from dataclasses import dataclass
 from sklearn.base import clone
 from sklearn.neighbors import NearestNeighbors
-
+from sklearn.base import is_regressor  
+    
 
 @dataclass
 class UncertaintyData:
@@ -97,6 +98,10 @@ class ProbabilityEnsemble:
         self._fitted = True
         return self
 
+    def predict_all(self, X):
+            """(k, n) member predictions."""
+            return np.stack([m.predict(X) for m in self.members], axis=0)
+
     
     def predict_proba_all(self, X):
         """(k, n, K)"""
@@ -110,11 +115,15 @@ class ProbabilityEnsemble:
 
     def predict(self, X):
         """Label with the highest averaged probability, (n,)."""
+        if is_regressor(self.members[0]):
+            return self.predict_all(X).mean(axis=0)
         return self.classes_[self.predict_proba(X).argmax(axis=1)]
 
     def score(self, X, y):
-        """Mean accuracy"""
-        return float((self.predict(X) == np.asarray(y)).mean())
+        y = np.asarray(y)
+        if is_regressor(self.members[0]):                 
+            return float(np.abs(y - self.predict(X)).mean())
+        return float((self.predict(X) == y).mean())
 
 
 def conformal_pvalues(S_calib_true, S_test_all):
@@ -174,6 +183,12 @@ def shannon_entropy(probs, axis=-1):
     return -np.sum(np.clip(probs, 1e-15, 1.0) * np.log2(np.clip(probs, 1e-15, 1.0)),
                    axis=axis)
 
+def _members(ensemble):
+    """Fitted members of a ProbabilityEnsemble (.members) or an sklearn forest (.estimators_)."""
+    for attr in ("members", "estimators_"):
+        if hasattr(ensemble, attr):
+            return list(getattr(ensemble, attr))
+    raise TypeError(f"{type(ensemble).__name__} has neither `.members` nor `.estimators_`.")
 
 class ConstantEU(UncertaintyMethod):
     """Baseline placeholder for uncertainty."""
@@ -199,13 +214,14 @@ class EntropyEU(UncertaintyMethod):
         self.ensemble = ensemble
 
     def transform(self, data):
+        if is_regressor(_members(self.ensemble)[0]):
+            raise TypeError("EntropyEU is classification-only for now; use VarianceEU for regression.")
         probs = self.ensemble.predict_proba_all(data.X)   
         K = probs.shape[-1]
 
         mean_probs = probs.mean(axis=0)                     
         total_uncertainty = shannon_entropy(mean_probs, axis=-1) / np.log2(K)   
 
-        # -- aleatoric uncertainty: entropy first, then average
         member_entropies = shannon_entropy(probs, axis=-1) / np.log2(K)         
         aleatoric_uncertainty = member_entropies.mean(axis=0)                   #
         # EU = TU-AU
@@ -219,7 +235,11 @@ class VarianceEU(UncertaintyMethod):
         self.ensemble = ensemble
 
     def transform(self, data):
-        return self.ensemble.predict_proba_all(data.X).var(axis=0).sum(axis=1)
+        members = _members(self.ensemble)
+        X = np.asarray(data.X)
+        if is_regressor(members[0]):
+            return np.stack([m.predict(X) for m in members]).var(axis=0)
+        return np.stack([m.predict_proba(X) for m in members]).var(axis=0).sum(axis=1)
 
 
 class KNNRadius(UncertaintyMethod):
