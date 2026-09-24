@@ -266,9 +266,10 @@ def multi_lambda_run_train_alpha_net(train_loader, lambdas, num_epochs=200, lr=1
 
 
 def run_uncertainty_ablation(train_loaders, lam, num_epochs=200, lr=1e-3, regression=False, 
-                             num_runs=5, max_alpha=1.0, patience=None, device='cpu'):
+                             num_runs=5, max_alpha=1.0, patience=None, device='cpu', seed=0):
     """
     One result per uncertainty method, with key as uncertainty method name.
+    seed : experiment seed; run r uses torch seed 1000 * seed + r (seed=0 -> r, as before).
     """
     all_results = {}
 
@@ -276,8 +277,8 @@ def run_uncertainty_ablation(train_loaders, lam, num_epochs=200, lr=1e-3, regres
         losses, sizes, alphas, nets = [], [], [], []
 
         for run in range(num_runs):
-            np.random.seed(run)
-            torch.manual_seed(run)
+            np.random.seed(1000 * seed + run)
+            torch.manual_seed(1000 * seed + run)
             print(f"\n[{name}] run {run + 1}/{num_runs}")
 
             net, meta = train_alpha_net(
